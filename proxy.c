@@ -3,7 +3,7 @@
  *
  * This program implements a multithreaded HTTP proxy.
  *
- * <Replace with your name(s) and NetID(s).>
+ * John Talghader jat8, Anjali Yamasani ay50
  */
 
 #include <assert.h>
@@ -17,6 +17,8 @@ static char *create_log_entry(const struct sockaddr_in *sockaddr,
 static int parse_uri(const char *uri, char **hostnamep, char **portp,
     char **pathnamep);
 
+void echo(int connfd);
+
 /*
  * Requires:
  *   <to be filled in by the student(s)>
@@ -27,15 +29,31 @@ static int parse_uri(const char *uri, char **hostnamep, char **portp,
 int
 main(int argc, char **argv)
 {
+	printf("%s\n", argv[0]);
+	printf("%s\n", argv[1]);
+	
+	// Iterative echo server main routine
+	int listenfd, connfd;
+	socklen_t clientlen;
+	struct sockaddr_storage clientaddr; /* Enough space for any address */
+	char client_hostname[MAXLINE], client_port[MAXLINE];
 
-	/* Check the arguments. */
 	if (argc != 2) {
-		fprintf(stderr, "Usage: %s <port number>\n", argv[0]);
+		fprintf(stderr, "usage: %s <port number>\n", argv[0]);
 		exit(0);
 	}
 
-	/* Return success. */
-	return (0);
+	listenfd = Open_listenfd(argv[1]);
+	while (1) {
+		clientlen = sizeof(struct sockaddr_storage);
+		connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
+		Getnameinfo((SA *) &clientaddr, clientlen, client_hostname, MAXLINE,
+			client_port, MAXLINE, 0);
+		printf("Connected to (%s, %s)\n", client_hostname, client_port);
+		echo(connfd);
+		Close(connfd);
+	}
+	exit(0);
 }
 
 /*
@@ -213,3 +231,69 @@ client_error(int fd, const char *cause, int err_num, const char *short_msg,
 // Prevent "unused function" and "unused variable" warnings.
 static const void *dummy_ref[] = { client_error, create_log_entry, dummy_ref,
 	parse_uri };
+
+#include "csapp.h"
+
+void
+echo(int connfd)
+{
+	size_t n;
+	char buf[MAXLINE];
+	rio_t rio;
+
+	Rio_readinitb(&rio, connfd);
+	while((n = Rio_readlineb(&rio, buf, MAXLINE)) != 0) {
+		printf("server received %d bytes\n", (int)n);
+		Rio_writen(connfd, buf, n);
+	}
+}
+
+/*
+	// Tiny web server main
+	int listenfd, connfd;
+	char hostname[MAXLINE], port[MAXLINE];
+	socklen_t clientlen;
+	struct sockaddr_storage clientaddr;
+
+	// Check command-line args
+	if (argc != 2) {
+		fprintf(stderr, "usage: %s <port>\n", argv[0]);
+		exit(1);
+	}
+
+	listenfd = Open_listenfd(argv[1]);
+	while (1) {
+		clientlen = sizeof(clientaddr);
+		connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
+		Getnameinfo((SA *) &clientaddr, clientlen, hostname, MAXLINE,
+		port, MAXLINE, 0);
+		printf("Accepted connection from (%s, %s)\n", hostname, port);
+		doit(connfd);
+		Close(connfd);
+	}
+*/
+
+/*
+	// Echo client main routine
+	int clientfd;
+	char *host, *port, buf[MAXLINE];
+	rio_t rio;
+
+	if (argc != 3) {
+		fprintf(stderr, "usage: %s <host> <port>\n", argv[0]);
+		exit(0);
+	}
+	host = argv[1];
+	port = argv[2];
+
+	clientfd = Open_clientfd(host, port);
+	Rio_readinitb(&rio, clientfd);
+
+	while (Fgets(buf, MAXLINE, stdin) != NULL) {
+		Rio_writen(clientfd, buf, strlen(buf));
+		Rio_readlineb(&rio, buf, MAXLINE);
+		Fputs(buf, stdout);
+	}
+	Close(clientfd);
+	exit(0);
+*/

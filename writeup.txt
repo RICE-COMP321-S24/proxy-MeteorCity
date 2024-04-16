@@ -1,6 +1,6 @@
 COMP 321 Project 6: Web Proxy
 
-<Replace with your name(s) and NetID(s).>
+John Talghader jat8, Anjali Yamasani ay50
 
 ---(Do not write lines of text that exceed the width of this line.)------------
 
