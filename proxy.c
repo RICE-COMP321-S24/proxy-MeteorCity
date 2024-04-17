@@ -29,9 +29,6 @@ void echo(int connfd);
 int
 main(int argc, char **argv)
 {
-	printf("%s\n", argv[0]);
-	printf("%s\n", argv[1]);
-	
 	// Iterative echo server main routine
 	int listenfd, connfd;
 	socklen_t clientlen;
@@ -43,13 +40,37 @@ main(int argc, char **argv)
 		exit(0);
 	}
 
+	// Open a listening socket
 	listenfd = Open_listenfd(argv[1]);
+
+	int counter = 0;
+	// Iterate through all clients trying to connect to proxy
 	while (1) {
+		// Accept incoming client connection
+		struct hostent *host_addresses;
+		struct in_addr **addr_list;
 		clientlen = sizeof(struct sockaddr_storage);
 		connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
 		Getnameinfo((SA *) &clientaddr, clientlen, client_hostname, MAXLINE,
 			client_port, MAXLINE, 0);
-		printf("Connected to (%s, %s)\n", client_hostname, client_port);
+		
+		host_addresses = gethostbyname(client_hostname);
+		if (host_addresses == NULL) {
+			fprintf(stderr, "gethostbyname: Unable to resolve hostname\n");
+			exit(1);
+		}
+
+		addr_list = (struct in_addr **)host_addresses->h_addr_list;
+		if (addr_list[0] != NULL) {
+			printf("Request %d: Received request from client (%s)\n"
+				, counter, inet_ntoa(*addr_list[0]));
+		} else {
+			fprintf(stderr, "No IP address found for the hostname\n");
+			exit(1);
+		}
+		
+		counter++;
+
 		echo(connfd);
 		Close(connfd);
 	}
@@ -243,7 +264,8 @@ echo(int connfd)
 
 	Rio_readinitb(&rio, connfd);
 	while((n = Rio_readlineb(&rio, buf, MAXLINE)) != 0) {
-		printf("server received %d bytes\n", (int)n);
+		printf(buf);
+		// printf("server received %d bytes\n", (int)n);
 		Rio_writen(connfd, buf, n);
 	}
 }
