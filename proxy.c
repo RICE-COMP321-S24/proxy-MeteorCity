@@ -17,6 +17,8 @@ static char *create_log_entry(const struct sockaddr_in *sockaddr,
 static int parse_uri(const char *uri, char **hostnamep, char **portp,
     char **pathnamep);
 static void proxy_doit(int connfd);
+// static void forward_request(int clientfd, char* method, char *uri, char *version, char *host);
+static void forward_request(int clientfd, char *request_line, char *request_header);
 
 /*
  * Requires:
@@ -28,7 +30,6 @@ static void proxy_doit(int connfd);
 int
 main(int argc, char **argv)
 {
-	// Iterative echo server main routine
 	int listenfd, connfd;
 	socklen_t clientlen;
 	struct sockaddr_storage clientaddr; /* Enough space for any address */
@@ -261,23 +262,30 @@ static void
 proxy_doit(int connfd)
 {
 	size_t n;
-	// char buf[MAXLINE];
 	int request_line_read = 0; // flag to indicate if the GET line was read
 	char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
-	char *hostname, *port, *pathname;
+	char *hostname = NULL, *port = NULL, *pathname = NULL;
+	char request_line[MAXLINE];
+	char request_header[MAXLINE];
+	char host[MAXLINE];
 	rio_t rio;
 
 	Rio_readinitb(&rio, connfd);
 
+	// Iterate through lines until an empty line is found
 	while ((n = Rio_readlineb(&rio, buf, MAXLINE)) != 0) {
+		if (strcmp(buf, "\r\n") == 0) {
+			// Empty line found, exit the loop
+			break;
+		}
+
 		if (!request_line_read) {
+			strcpy(request_line, buf);
 			if (sscanf(buf, "%s %s %s", method, uri, version) < 3) {
 				client_error(connfd, method, 400, "Bad Request",
 				    "Proxy received a malformed request line");
 				return;
 			}
-
-			sscanf(buf, "%s %s %s", method, uri, version);
 
 			if (strcasecmp(method, "GET") != 0) {
 				client_error(connfd, method, 501,
@@ -296,94 +304,42 @@ proxy_doit(int connfd)
 			request_line_read = 1;
 
 		} else {
+			strcpy(host, buf + 6);
+			strcpy(request_header, buf);
 		}
-		printf("%s", buf);
-		// printf("server received %d bytes\n", (int)n);
-		// Rio_writen(connfd, buf, n);
 	}
 
-	// if (Rio_readlineb(&rio, buf, MAXLINE) != 0) {
-	// 	sscanf(buf, "%s %s %s", method, uri, version);
-	// 	if (parse_uri(uri, &hostname, &port, &pathname) == 0) {
-	// 		// Now you have the hostname, port, and pathname
-	// 		// Connect to the hostname on the specified port and
-	// 		// request the pathname
-	// 		int serverfd = open_clientfd(hostname, port);
-	// 		if (serverfd < 0) {
-	// 			client_error(connfd, "HTTP/1.0", 500,
-	// 			    "Internal Server Error",
-	// 			    "The proxy server failed to connect to the
-	// target server."); 		} else {
-	// 			// forward_request(serverfd, method,
-	// 			// pathname,version); get_response(serverfd,
-	// 			// connfd);
-	// 			printf("Ready to forward request.");
-	// 			Close(serverfd);
-	// 		}
+	int clientfd = Open_clientfd(hostname, port);
+	forward_request(clientfd, request_line, request_header);
 
-	// 		// Free the allocated memory
-	// 		free(hostname);
-	// 		free(port);
-	// 		free(pathname);
-	// 	} else {
-	// 		client_error(connfd, "HTTP/1.0", 400, "Bad Request",
-	// 		    "Malformed request line.");
-	// 	}
-	// }
-
-	// prints request headers to console for debugging/logging purposes
-	printf("Request headers:\n");
-	printf("%s", buf);
-
-	// read_requesthdrs(&rio);
+	Close(clientfd);
 }
 
-/*
-	// Tiny web server main
-	int listenfd, connfd;
-	char hostname[MAXLINE], port[MAXLINE];
-	socklen_t clientlen;
-	struct sockaddr_storage clientaddr;
-
-	// Check command-line args
-	if (argc != 2) {
-		fprintf(stderr, "usage: %s <port>\n", argv[0]);
-		exit(1);
-	}
-
-	listenfd = Open_listenfd(argv[1]);
-	while (1) {
-		clientlen = sizeof(clientaddr);
-		connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
-		Getnameinfo((SA *) &clientaddr, clientlen, hostname, MAXLINE,
-		port, MAXLINE, 0);
-		printf("Accepted connection from (%s, %s)\n", hostname, port);
-		doit(connfd);
-		Close(connfd);
-	}
-*/
-
-/*
-	// Echo client main routine
-	int clientfd;
-	char *host, *port, buf[MAXLINE];
+static void
+forward_request(int clientfd, char *request_line, char *request_header)
+{
+	char request[MAXLINE * 2 + 5]; // Maximum size for the request
 	rio_t rio;
 
-	if (argc != 3) {
-		fprintf(stderr, "usage: %s <host> <port>\n", argv[0]);
-		exit(0);
-	}
-	host = argv[1];
-	port = argv[2];
+	// Initialize request buffer
+	request[0] = '\0';
 
-	clientfd = Open_clientfd(host, port);
+	// Modify request_line and request_header
+	size_t request_header_len = strlen(request_header);
+	request_line += 11; // Remove GET http://
+	request_line += request_header_len - 8; // Remove host (-8 to get rid of \r\n and Host: )
+
+	strcat(request, "GET ");
+	strcat(request, request_line);
+	strcat(request, "\r\n");
+	strcat(request, request_header);
+	strcat(request, "\r\n\r\n");
+	printf("request: %s\n", request);
+
 	Rio_readinitb(&rio, clientfd);
 
-	while (Fgets(buf, MAXLINE, stdin) != NULL) {
-		Rio_writen(clientfd, buf, strlen(buf));
-		Rio_readlineb(&rio, buf, MAXLINE);
-		Fputs(buf, stdout);
-	}
-	Close(clientfd);
-	exit(0);
-*/
+	// Write the request to the server
+	Rio_writen(clientfd, request, strlen(request));
+	Rio_readlineb(&rio, request, MAXLINE);
+	Fputs(request, stdout);
+}
