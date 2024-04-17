@@ -16,8 +16,7 @@ static char *create_log_entry(const struct sockaddr_in *sockaddr,
     const char *uri, int size);
 static int parse_uri(const char *uri, char **hostnamep, char **portp,
     char **pathnamep);
-
-void echo(int connfd);
+static void proxy_doit(int connfd);
 
 /*
  * Requires:
@@ -51,27 +50,30 @@ main(int argc, char **argv)
 		struct in_addr **addr_list;
 		clientlen = sizeof(struct sockaddr_storage);
 		connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
-		Getnameinfo((SA *) &clientaddr, clientlen, client_hostname, MAXLINE,
-			client_port, MAXLINE, 0);
-		
+		Getnameinfo((SA *)&clientaddr, clientlen, client_hostname,
+		    MAXLINE, client_port, MAXLINE, 0);
+
 		host_addresses = gethostbyname(client_hostname);
 		if (host_addresses == NULL) {
-			fprintf(stderr, "gethostbyname: Unable to resolve hostname\n");
+			fprintf(stderr,
+			    "gethostbyname: Unable to resolve hostname\n");
 			exit(1);
 		}
 
 		addr_list = (struct in_addr **)host_addresses->h_addr_list;
 		if (addr_list[0] != NULL) {
-			printf("Request %d: Received request from client (%s)\n"
-				, counter, inet_ntoa(*addr_list[0]));
+			printf(
+			    "Request %d: Received request from client (%s)\n",
+			    counter, inet_ntoa(*addr_list[0]));
 		} else {
-			fprintf(stderr, "No IP address found for the hostname\n");
+			fprintf(stderr,
+			    "No IP address found for the hostname\n");
 			exit(1);
 		}
-		
+
 		counter++;
 
-		echo(connfd);
+		proxy_doit(connfd);
 		Close(connfd);
 	}
 	exit(0);
@@ -255,19 +257,85 @@ static const void *dummy_ref[] = { client_error, create_log_entry, dummy_ref,
 
 #include "csapp.h"
 
-void
-echo(int connfd)
+static void
+proxy_doit(int connfd)
 {
 	size_t n;
-	char buf[MAXLINE];
+	// char buf[MAXLINE];
+	int request_line_read = 0; // flag to indicate if the GET line was read
+	char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
+	char *hostname, *port, *pathname;
 	rio_t rio;
 
 	Rio_readinitb(&rio, connfd);
-	while((n = Rio_readlineb(&rio, buf, MAXLINE)) != 0) {
-		printf(buf);
+
+	while ((n = Rio_readlineb(&rio, buf, MAXLINE)) != 0) {
+		if (!request_line_read) {
+			if (sscanf(buf, "%s %s %s", method, uri, version) < 3) {
+				client_error(connfd, method, 400, "Bad Request",
+				    "Proxy received a malformed request line");
+				return;
+			}
+
+			sscanf(buf, "%s %s %s", method, uri, version);
+
+			if (strcasecmp(method, "GET") != 0) {
+				client_error(connfd, method, 501,
+				    "Not implemented",
+				    "Proxy does not implement this method");
+				return;
+			}
+
+			// Parse the URI
+			if (parse_uri(uri, &hostname, &port, &pathname) == -1) {
+				client_error(connfd, method, 400, "Bad Request",
+				    "Proxy could not parse the request URI");
+				return;
+			}
+
+			request_line_read = 1;
+
+		} else {
+		}
+		printf("%s", buf);
 		// printf("server received %d bytes\n", (int)n);
-		Rio_writen(connfd, buf, n);
+		// Rio_writen(connfd, buf, n);
 	}
+
+	// if (Rio_readlineb(&rio, buf, MAXLINE) != 0) {
+	// 	sscanf(buf, "%s %s %s", method, uri, version);
+	// 	if (parse_uri(uri, &hostname, &port, &pathname) == 0) {
+	// 		// Now you have the hostname, port, and pathname
+	// 		// Connect to the hostname on the specified port and
+	// 		// request the pathname
+	// 		int serverfd = open_clientfd(hostname, port);
+	// 		if (serverfd < 0) {
+	// 			client_error(connfd, "HTTP/1.0", 500,
+	// 			    "Internal Server Error",
+	// 			    "The proxy server failed to connect to the
+	// target server."); 		} else {
+	// 			// forward_request(serverfd, method,
+	// 			// pathname,version); get_response(serverfd,
+	// 			// connfd);
+	// 			printf("Ready to forward request.");
+	// 			Close(serverfd);
+	// 		}
+
+	// 		// Free the allocated memory
+	// 		free(hostname);
+	// 		free(port);
+	// 		free(pathname);
+	// 	} else {
+	// 		client_error(connfd, "HTTP/1.0", 400, "Bad Request",
+	// 		    "Malformed request line.");
+	// 	}
+	// }
+
+	// prints request headers to console for debugging/logging purposes
+	printf("Request headers:\n");
+	printf("%s", buf);
+
+	// read_requesthdrs(&rio);
 }
 
 /*
