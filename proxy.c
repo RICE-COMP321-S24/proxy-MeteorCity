@@ -18,7 +18,9 @@ static int parse_uri(const char *uri, char **hostnamep, char **portp,
     char **pathnamep);
 static void proxy_doit(int connfd);
 // static void forward_request(int clientfd, char* method, char *uri, char *version, char *host);
-static void forward_request(int clientfd, char *request_line, char *request_header);
+static void forward_request(int clientfd, int connfd, char *request_line, char *request_header);
+
+int counter = 0;
 
 /*
  * Requires:
@@ -43,7 +45,6 @@ main(int argc, char **argv)
 	// Open a listening socket
 	listenfd = Open_listenfd(argv[1]);
 
-	int counter = 0;
 	// Iterate through all clients trying to connect to proxy
 	while (1) {
 		// Accept incoming client connection
@@ -72,9 +73,8 @@ main(int argc, char **argv)
 			exit(1);
 		}
 
-		counter++;
-
 		proxy_doit(connfd);
+		counter++;
 		Close(connfd);
 	}
 	exit(0);
@@ -267,12 +267,10 @@ proxy_doit(int connfd)
 	char *hostname = NULL, *port = NULL, *pathname = NULL;
 	char request_line[MAXLINE];
 	char request_header[MAXLINE];
-	char host[MAXLINE];
 	rio_t rio;
 
 	Rio_readinitb(&rio, connfd);
 
-	// Iterate through lines until an empty line is found
 	while ((n = Rio_readlineb(&rio, buf, MAXLINE)) != 0) {
 		if (strcmp(buf, "\r\n") == 0) {
 			// Empty line found, exit the loop
@@ -304,42 +302,89 @@ proxy_doit(int connfd)
 			request_line_read = 1;
 
 		} else {
-			strcpy(host, buf + 6);
 			strcpy(request_header, buf);
 		}
 	}
 
-	int clientfd = Open_clientfd(hostname, port);
-	forward_request(clientfd, request_line, request_header);
+	int serverfd = Open_clientfd(hostname, port);
+	forward_request(serverfd, connfd, request_line, request_header);
 
-	Close(clientfd);
+	Close(serverfd);
 }
 
+/*
+void print_string_with_special_chars(const char *str) {
+    while (*str) {
+        switch (*str) {
+            case '\n':
+                printf("\\n");
+                break;
+            case '\r':
+                printf("\\r");
+                break;
+            case '\t':
+                printf("\\t");
+                break;
+            // Add more cases for other special characters if needed
+            default:
+                if (*str <html 32 || *str > 126) {
+                    // Print non-printable characters using their ASCII code
+                    printf("\\x%02X", (unsigned char)*str);
+                } else {
+                    // Print printable characters as is
+                    putchar(*str);
+                }
+                break;
+        }
+        str++;
+    }
+}
+*/
+
 static void
-forward_request(int clientfd, char *request_line, char *request_header)
+forward_request(int serverfd, int connfd, char *request_line, char *request_header)
 {
 	char request[MAXLINE * 2 + 5]; // Maximum size for the request
+	char response[MAXLINE];
 	rio_t rio;
+
+	printf("%s", request_line);
+	printf("%s\n", request_header);
 
 	// Initialize request buffer
 	request[0] = '\0';
 
 	// Modify request_line and request_header
-	size_t request_header_len = strlen(request_header);
-	request_line += 11; // Remove GET http://
-	request_line += request_header_len - 8; // Remove host (-8 to get rid of \r\n and Host: )
+	request_line += strlen("GET http://"); // Remove GET http://
+	request_line += strlen(request_header) - 8; // Remove host (-8 to get rid of \r\n and Host: )
 
 	strcat(request, "GET ");
 	strcat(request, request_line);
-	strcat(request, "\r\n");
 	strcat(request, request_header);
-	strcat(request, "\r\n\r\n");
-	printf("request: %s\n", request);
+	printf("*** End of Request ***\n");
+	printf("Request %d: Forwarding request to server:\n", counter);
+	printf(request);
+	printf("Connection: close\n\n");
+	strcat(request, "\r\n"); // Add \r\n after the header
 
-	Rio_readinitb(&rio, clientfd);
+	Rio_readinitb(&rio, serverfd);
 
 	// Write the request to the server
-	Rio_writen(clientfd, request, strlen(request));
-	Rio_readlineb(&rio, request, MAXLINE);
-	Fputs(request, stdout);
+	Rio_writen(serverfd, request, strlen(request));
+
+	int total_bytes = 0;
+
+	while (Rio_readlineb(&rio, response, MAXLINE) != 0) {
+		total_bytes += strlen(response);
+		Rio_writen(connfd, response, strlen(response));
+
+		if (strcmp(response, "</html>\n") == 0) {
+			Rio_writen(connfd, "\n", 1);
+			total_bytes++;
+			break;
+		}
+	}
+
+	printf("*** End of Request ***\n");
+	printf("Request %d: Forwarded %d bytes from server to client\n", counter, total_bytes);
 }
