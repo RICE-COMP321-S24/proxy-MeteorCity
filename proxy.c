@@ -17,9 +17,9 @@ static char *create_log_entry(const struct sockaddr_in *sockaddr,
 static int parse_uri(const char *uri, char **hostnamep, char **portp,
     char **pathnamep);
 
-static void proxy_doit(int connfd, char *ip_addr);
-static void forward_request(int clientfd, int connfd, char *request_line, char *request_header, char *ip_addr);
-static void log_entry(char *date, char *ip_addr, char *url, size_t size);
+static void proxy_doit(int connfd, struct sockaddr_storage clientaddr);
+static void forward_request(int clientfd, int connfd, char *request_line, char *request_header, struct sockaddr_storage clientaddr);
+static void log_entry(struct sockaddr_in *sockaddr, char *uri, size_t size);
 
 int counter = 0;
 FILE *proxy_log = NULL;
@@ -84,7 +84,7 @@ main(int argc, char **argv)
 			exit(1);
 		}
 
-		proxy_doit(connfd, ip_addr);
+		proxy_doit(connfd, clientaddr);
 		counter++;
 		Close(connfd);
 	}
@@ -272,7 +272,7 @@ static const void *dummy_ref[] = { client_error, create_log_entry, dummy_ref,
 #include "csapp.h"
 
 static void
-proxy_doit(int connfd, char *ip_addr)
+proxy_doit(int connfd, struct sockaddr_storage clientaddr)
 {
 	size_t n;
 	int request_line_read = 0; // flag to indicate if the GET line was read
@@ -320,7 +320,7 @@ proxy_doit(int connfd, char *ip_addr)
 	}
 
 	int serverfd = Open_clientfd(hostname, port);
-	forward_request(serverfd, connfd, request_line, request_header, ip_addr);
+	forward_request(serverfd, connfd, request_line, request_header, clientaddr);
 
 	Close(serverfd);
 }
@@ -340,7 +340,7 @@ void print_string_with_special_chars(const char *str) {
                 break;
             // Add more cases for other special characters if needed
             default:
-                if (*str < 32 || *str > 126) {
+                if (*str <html 32 || *str > 126) {
                     // Print non-printable characters using their ASCII code
                     printf("\\x%02X", (unsigned char)*str);
                 } else {
@@ -355,19 +355,26 @@ void print_string_with_special_chars(const char *str) {
 */
 
 static void
-forward_request(int serverfd, int connfd, char *request_line, char *request_header, char *ip_addr)
+forward_request(int serverfd, int connfd, char *request_line, char *request_header, struct sockaddr_storage clientaddr)
 {
 	char request[MAXLINE * 2 + 5]; // Maximum size for the request
 	char response[MAXLINE];
-	char date[MAXLINE];
-	char *url = request_line + 4; // Remove "GET "
+	char *uri = malloc(strlen(request_line) + 1);
+	strcpy(uri, request_line);
+	uri += 4; // Remove "GET "
 	rio_t rio;
+
+	// Reset request buffer
+    	request[0] = '\0';
+
+	// Remove " HTTP" from end of uri
+	char *space_ptr = strstr(uri, " HTTP");
+	if (space_ptr != NULL) {
+		*space_ptr = '\0';
+	}
 
 	printf("%s", request_line);
 	printf("%s\n", request_header);
-
-	// Initialize request buffer
-	// request[0] = '\0';
 
 	// Modify request_line and request_header
 	request_line += strlen("GET http://"); // Remove "GET http://"
@@ -392,52 +399,27 @@ forward_request(int serverfd, int connfd, char *request_line, char *request_head
 	while (Rio_readlineb(&rio, response, MAXLINE) != 0) {
 		total_bytes += strlen(response);
 		Rio_writen(connfd, response, strlen(response));
-		if (strncmp(response, "Date: ", 6) == 0) {
-			strncpy(date, response + 6, MAXLINE - 6); // Copy everything after "Date: "
-           		date[MAXLINE - 7] = '\0'; // Truncate string
-
-			// Remove carriage and newline character from the end of the date string
-			size_t len = strlen(date);
-			if (len > 0 && date[len - 2] == '\r') {
-				date[len - 2] = '\0'; // Replace newline with null terminator
-			}
-		}
-		if (strcmp(response, "</>\n") == 0) {
+		if (strcmp(response, "</html>\n") == 0) {
 			break;
 		}
 	}
 
-	log_entry(date, ip_addr, url, total_bytes);
+	log_entry((struct sockaddr_in *)&clientaddr, uri, total_bytes);
+
+	uri -= 4; // Reset uri pointer to be freed
+	free(uri);
 
 	printf("*** End of Request ***\n");
 	printf("Request %d: Forwarded %ld bytes from server to client\n", counter, total_bytes);
 }
 
 static void
-log_entry(char *date, char *ip_addr, char *url, size_t size)
+log_entry(struct sockaddr_in *sockaddr, char *uri, size_t size)
 {
-	char entry[512];
-	char size_str[20];
+	char *entry;
+	entry = create_log_entry(sockaddr, uri, size);
 
-	// Get rid of HTTP/1.x in url
-	char *space_ptr = strstr(url, " HTTP");
-	if (space_ptr != NULL) {
-		*space_ptr = '\0';
-	}
-
-	// Convert size to a string
-	snprintf(size_str, sizeof(size_str), "%zu", size);
-
-	// Set up the entry
-	strcpy(entry, date);
-	strcat(entry, " ");
-	strcat(entry, ip_addr);
-	strcat(entry, " ");
-	strcat(entry, url);
-	strcat(entry, " ");
-	strcat(entry, size_str);
-	strcat(entry, "\n");
-
-	fprintf(proxy_log, entry);
+	fprintf(proxy_log, "%s\n", entry);
+	free(entry);
 	fflush(proxy_log);
 }
