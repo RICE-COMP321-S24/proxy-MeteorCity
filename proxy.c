@@ -16,11 +16,13 @@ static char *create_log_entry(const struct sockaddr_in *sockaddr,
     const char *uri, int size);
 static int parse_uri(const char *uri, char **hostnamep, char **portp,
     char **pathnamep);
-static void proxy_doit(int connfd);
-// static void forward_request(int clientfd, char* method, char *uri, char *version, char *host);
-static void forward_request(int clientfd, int connfd, char *request_line, char *request_header);
+
+static void proxy_doit(int connfd, char *ip_addr);
+static void forward_request(int clientfd, int connfd, char *request_line, char *request_header, char *ip_addr);
+static void log_entry(char *date, char *ip_addr, char *url, size_t size);
 
 int counter = 0;
+FILE *proxy_log = NULL;
 
 /*
  * Requires:
@@ -33,6 +35,7 @@ int
 main(int argc, char **argv)
 {
 	int listenfd, connfd;
+	char *ip_addr = NULL;
 	socklen_t clientlen;
 	struct sockaddr_storage clientaddr; /* Enough space for any address */
 	char client_hostname[MAXLINE], client_port[MAXLINE];
@@ -44,6 +47,13 @@ main(int argc, char **argv)
 
 	// Open a listening socket
 	listenfd = Open_listenfd(argv[1]);
+
+	// Open proxy.log file
+	proxy_log = fopen("proxy.log", "a"); // Open log file in append mode
+	if (proxy_log == NULL) {
+		perror("Error opening proxy.log");
+		exit(EXIT_FAILURE);
+	}
 
 	// Iterate through all clients trying to connect to proxy
 	while (1) {
@@ -64,19 +74,22 @@ main(int argc, char **argv)
 
 		addr_list = (struct in_addr **)host_addresses->h_addr_list;
 		if (addr_list[0] != NULL) {
+			ip_addr = inet_ntoa(*addr_list[0]);
 			printf(
-			    "Request %d: Received request from client (%s)\n",
-			    counter, inet_ntoa(*addr_list[0]));
+			    "\nRequest %d: Received request from client (%s)\n",
+			    counter, ip_addr);
 		} else {
 			fprintf(stderr,
 			    "No IP address found for the hostname\n");
 			exit(1);
 		}
 
-		proxy_doit(connfd);
+		proxy_doit(connfd, ip_addr);
 		counter++;
 		Close(connfd);
 	}
+
+	fclose(proxy_log);
 	exit(0);
 }
 
@@ -259,7 +272,7 @@ static const void *dummy_ref[] = { client_error, create_log_entry, dummy_ref,
 #include "csapp.h"
 
 static void
-proxy_doit(int connfd)
+proxy_doit(int connfd, char *ip_addr)
 {
 	size_t n;
 	int request_line_read = 0; // flag to indicate if the GET line was read
@@ -307,7 +320,7 @@ proxy_doit(int connfd)
 	}
 
 	int serverfd = Open_clientfd(hostname, port);
-	forward_request(serverfd, connfd, request_line, request_header);
+	forward_request(serverfd, connfd, request_line, request_header, ip_addr);
 
 	Close(serverfd);
 }
@@ -327,7 +340,7 @@ void print_string_with_special_chars(const char *str) {
                 break;
             // Add more cases for other special characters if needed
             default:
-                if (*str <html 32 || *str > 126) {
+                if (*str < 32 || *str > 126) {
                     // Print non-printable characters using their ASCII code
                     printf("\\x%02X", (unsigned char)*str);
                 } else {
@@ -342,20 +355,22 @@ void print_string_with_special_chars(const char *str) {
 */
 
 static void
-forward_request(int serverfd, int connfd, char *request_line, char *request_header)
+forward_request(int serverfd, int connfd, char *request_line, char *request_header, char *ip_addr)
 {
 	char request[MAXLINE * 2 + 5]; // Maximum size for the request
 	char response[MAXLINE];
+	char date[MAXLINE];
+	char *url = request_line + 4; // Remove "GET "
 	rio_t rio;
 
 	printf("%s", request_line);
 	printf("%s\n", request_header);
 
 	// Initialize request buffer
-	request[0] = '\0';
+	// request[0] = '\0';
 
 	// Modify request_line and request_header
-	request_line += strlen("GET http://"); // Remove GET http://
+	request_line += strlen("GET http://"); // Remove "GET http://"
 	request_line += strlen(request_header) - 8; // Remove host (-8 to get rid of \r\n and Host: )
 
 	strcat(request, "GET ");
@@ -372,19 +387,57 @@ forward_request(int serverfd, int connfd, char *request_line, char *request_head
 	// Write the request to the server
 	Rio_writen(serverfd, request, strlen(request));
 
-	int total_bytes = 0;
+	size_t total_bytes = 0;
 
 	while (Rio_readlineb(&rio, response, MAXLINE) != 0) {
 		total_bytes += strlen(response);
 		Rio_writen(connfd, response, strlen(response));
+		if (strncmp(response, "Date: ", 6) == 0) {
+			strncpy(date, response + 6, MAXLINE - 6); // Copy everything after "Date: "
+           		date[MAXLINE - 7] = '\0'; // Truncate string
 
-		if (strcmp(response, "</html>\n") == 0) {
-			Rio_writen(connfd, "\n", 1);
-			total_bytes++;
+			// Remove carriage and newline character from the end of the date string
+			size_t len = strlen(date);
+			if (len > 0 && date[len - 2] == '\r') {
+				date[len - 2] = '\0'; // Replace newline with null terminator
+			}
+		}
+		if (strcmp(response, "</>\n") == 0) {
 			break;
 		}
 	}
 
+	log_entry(date, ip_addr, url, total_bytes);
+
 	printf("*** End of Request ***\n");
-	printf("Request %d: Forwarded %d bytes from server to client\n", counter, total_bytes);
+	printf("Request %d: Forwarded %ld bytes from server to client\n", counter, total_bytes);
+}
+
+static void
+log_entry(char *date, char *ip_addr, char *url, size_t size)
+{
+	char entry[512];
+	char size_str[20];
+
+	// Get rid of HTTP/1.x in url
+	char *space_ptr = strstr(url, " HTTP");
+	if (space_ptr != NULL) {
+		*space_ptr = '\0';
+	}
+
+	// Convert size to a string
+	snprintf(size_str, sizeof(size_str), "%zu", size);
+
+	// Set up the entry
+	strcpy(entry, date);
+	strcat(entry, " ");
+	strcat(entry, ip_addr);
+	strcat(entry, " ");
+	strcat(entry, url);
+	strcat(entry, " ");
+	strcat(entry, size_str);
+	strcat(entry, "\n");
+
+	fprintf(proxy_log, entry);
+	fflush(proxy_log);
 }
