@@ -395,22 +395,38 @@ forward_request(int serverfd, int connfd, char *request_line, char *request_head
 	Rio_writen(serverfd, request, strlen(request));
 
 	size_t total_bytes = 0;
+	size_t n;
+	char chunk[MAXLINE];
+	size_t chunk_size = 0;
 
-	while (Rio_readlineb(&rio, response, MAXLINE) != 0) {
-		total_bytes += strlen(response);
-		Rio_writen(connfd, response, strlen(response));
+	printf("*** End of Request ***\n");
+	while ((n = Rio_readlineb(&rio, response, MAXLINE)) != 0) {
+		total_bytes += n;
+		if (chunk_size + n < MAXLINE) {
+			memcpy(chunk + chunk_size, response, n);
+			chunk_size += n;
+		} else {
+			size_t remaining_bytes = MAXLINE - chunk_size;
+			memcpy(chunk + chunk_size, response, remaining_bytes);
+			Rio_writen(connfd, chunk, MAXLINE);
+			printf("Request %d: Forwarded %d bytes from server to client\n", counter, MAXLINE);
+			chunk[0] = '\0';
+			memcpy(chunk, response + remaining_bytes, n - remaining_bytes);
+			chunk_size = n - remaining_bytes;
+		}
+
 		if (strcmp(response, "</html>\n") == 0) {
 			break;
 		}
 	}
 
+	Rio_writen(connfd, chunk, chunk_size);
+	printf("Request %d: Forwarded %ld bytes from server to client\n", counter, chunk_size);
+
 	log_entry((struct sockaddr_in *)&clientaddr, uri, total_bytes);
 
 	uri -= 4; // Reset uri pointer to be freed
 	free(uri);
-
-	printf("*** End of Request ***\n");
-	printf("Request %d: Forwarded %ld bytes from server to client\n", counter, total_bytes);
 }
 
 static void
