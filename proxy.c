@@ -9,6 +9,24 @@
 #include <assert.h>
 
 #include "csapp.h"
+#define NTHREADS 4
+#define SBUFSIZE 16
+
+struct client_struct {
+	struct sockaddr_storage clientaddr;
+	int connfd;
+};
+
+struct sbuf {
+	struct client_struct *client_buf;
+	int numSlots;		       // max num slots
+	int count;		       // num items in the buffer
+	int front;		       // buf[(front+1)%n] is the first item
+	int rear;		       // buf[rear%n] is the last item
+	pthread_mutex_t mutex;	       // protects access to buf
+	pthread_cond_t cond_not_empty; // signals that a get is possible
+	pthread_cond_t cond_not_full;  // signals that a put is possible
+};
 
 static void client_error(int fd, const char *cause, int err_num,
     const char *short_msg, const char *long_msg);
@@ -18,12 +36,24 @@ static int parse_uri(const char *uri, char **hostnamep, char **portp,
     char **pathnamep);
 
 static void proxy_doit(int connfd, struct sockaddr_storage clientaddr);
-static void forward_request(int clientfd, int connfd, char *request, char *request_line, struct sockaddr_storage clientaddr);
+static void forward_request(int clientfd, int connfd, char *request,
+    char *request_line, struct sockaddr_storage clientaddr);
+static void forward_request(int clientfd, int connfd, char *request_line,
+    char *request_header, struct sockaddr_storage clientaddr);
 static void log_entry(struct sockaddr_in *sockaddr, char *uri, size_t size);
-static int build_request(rio_t * rio, int connfd, char **request, char *request_line);
+static int build_request(rio_t *rio, int connfd, char **request,
+    char *request_line);
+static void *thread(void *vargp);
+static void sbuf_init(struct sbuf *sp, int n);
+static void sbuf_insert(struct sbuf *sp, struct client_struct client);
+static struct client_struct sbuf_remove(struct sbuf *sp);
+static void sbuf_clean(struct sbuf *sp);
 
+/* Global variables */
 int counter = 0;
 FILE *proxy_log = NULL;
+struct sbuf sbuffer; /* Shared buffer of connected descriptors */
+// char *http_request_flag; /* HTTP/1.0 or HTTP/1.1 */
 
 /*
  * Requires:
@@ -35,19 +65,21 @@ FILE *proxy_log = NULL;
 int
 main(int argc, char **argv)
 {
-	int listenfd, connfd;
-	char *ip_addr = NULL;
+	int listenfd;
 	socklen_t clientlen;
-	struct sockaddr_storage clientaddr; /* Enough space for any address */
+	// struct sockaddr_storage clientaddr; /* Enough space for any address
+	// */
 	char client_hostname[MAXLINE], client_port[MAXLINE];
+	pthread_t tid;
+	// char *ip_addr = NULL;
 
 	if (argc != 2) {
 		fprintf(stderr, "usage: %s <port number>\n", argv[0]);
 		exit(0);
 	}
 
-	// Open a listening socket
-	listenfd = Open_listenfd(argv[1]);
+	// ignore SIGPIPE signals
+	Signal(SIGPIPE, SIG_IGN);
 
 	// Open proxy.log file
 	proxy_log = fopen("proxy.log", "a"); // Open log file in append mode
@@ -56,41 +88,58 @@ main(int argc, char **argv)
 		exit(EXIT_FAILURE);
 	}
 
+	// Open a listening socket
+	listenfd = Open_listenfd(argv[1]);
+
+	// Initialize sbuffer object and its fields
+	sbuf_init(&sbuffer, SBUFSIZE);
+	printf("Successfully initialized sbuf.\n");
+
+	// Creates worker threads
+	for (int i = 0; i < NTHREADS; i++) {
+		Pthread_create(&tid, NULL, thread, NULL);
+	}
+
 	// Iterate through all clients trying to connect to proxy
 	while (1) {
 		// Accept incoming client connection
-		struct hostent *host_addresses;
-		struct in_addr **addr_list;
-		clientlen = sizeof(struct sockaddr_storage);
-		connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
-		Getnameinfo((SA *)&clientaddr, clientlen, client_hostname,
-		    MAXLINE, client_port, MAXLINE, 0);
+		struct sockaddr_storage clientaddr;
+		clientlen = sizeof(clientaddr);
+		int connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
+		struct client_struct client;
 
-		host_addresses = gethostbyname(client_hostname);
-		if (host_addresses == NULL) {
-			fprintf(stderr,
-			    "gethostbyname: Unable to resolve hostname\n");
-			exit(1);
+		if (client.connfd < 0) {
+			perror("Accept error");
+			continue;
 		}
 
-		addr_list = (struct in_addr **)host_addresses->h_addr_list;
-		if (addr_list[0] != NULL) {
-			ip_addr = inet_ntoa(*addr_list[0]);
-			printf(
-			    "\nRequest %d: Received request from client (%s)\n",
-			    counter, ip_addr);
-		} else {
-			fprintf(stderr,
-			    "No IP address found for the hostname\n");
-			exit(1);
+		client.connfd = connfd;
+		client.clientaddr = clientaddr;
+
+		// Make sure you use the correct size for the specific address
+		// family
+		int res = getnameinfo((struct sockaddr *)&clientaddr, clientlen,
+		    client_hostname, MAXLINE, client_port, MAXLINE,
+		    NI_NUMERICHOST | NI_NUMERICSERV);
+
+		if (res != 0) {
+			fprintf(stderr, "Getnameinfo error: %s\n",
+			    gai_strerror(res));
+			// Handle error, for example, by continuing to the next
+			// iteration of the loop.
+			continue;
 		}
 
-		proxy_doit(connfd, clientaddr);
+		printf("\nRequest %d: Received request from client %s:%s\n",
+		    counter, client_hostname, client_port);
+
+		sbuf_insert(&sbuffer, client);
 		counter++;
-		Close(connfd);
 	}
 
+	Close(listenfd);
 	fclose(proxy_log);
+	sbuf_clean(&sbuffer);
 	exit(0);
 }
 
@@ -272,31 +321,34 @@ static const void *dummy_ref[] = { client_error, create_log_entry, dummy_ref,
 
 #include "csapp.h"
 
-void print_string_with_special_chars(const char *str) {
-    while (*str) {
-        switch (*str) {
-            case '\n':
-                printf("\\n");
-                break;
-            case '\r':
-                printf("\\r");
-                break;
-            case '\t':
-                printf("\\t");
-                break;
-            // Add more cases for other special characters if needed
-            default:
-                if (*str < 32 || *str > 126) {
-                    // Print non-printable characters using their ASCII code
-                    printf("\\x%02X", (unsigned char)*str);
-                } else {
-                    // Print printable characters as is
-                    putchar(*str);
-                }
-                break;
-        }
-        str++;
-    }
+void
+print_string_with_special_chars(const char *str)
+{
+	while (*str) {
+		switch (*str) {
+		case '\n':
+			printf("\\n");
+			break;
+		case '\r':
+			printf("\\r");
+			break;
+		case '\t':
+			printf("\\t");
+			break;
+		// Add more cases for other special characters if needed
+		default:
+			if (*str < 32 || *str > 126) {
+				// Print non-printable characters using their
+				// ASCII code
+				printf("\\x%02X", (unsigned char)*str);
+			} else {
+				// Print printable characters as is
+				putchar(*str);
+			}
+			break;
+		}
+		str++;
+	}
 }
 
 static void
@@ -308,6 +360,7 @@ proxy_doit(int connfd, struct sockaddr_storage clientaddr)
 	rio_t rio;
 
 	request = malloc(1);
+	request[0] = '\0';
 	rio_readinitb(&rio, connfd);
 	rio_readlineb(&rio, request_line, MAXLINE); // Get the request line
 	serverfd = build_request(&rio, connfd, &request, request_line);
@@ -318,7 +371,8 @@ proxy_doit(int connfd, struct sockaddr_storage clientaddr)
 }
 
 static void
-forward_request(int serverfd, int connfd, char *request, char *request_line, struct sockaddr_storage clientaddr)
+forward_request(int serverfd, int connfd, char *request, char *request_line,
+    struct sockaddr_storage clientaddr)
 {
 	char response[MAXLINE];
 	char uri[MAXLINE];
@@ -348,11 +402,11 @@ forward_request(int serverfd, int connfd, char *request, char *request_line, str
 
 	// Print to stdout to match reference solution
 	printf("*** End of Request ***\n");
-	printf("Request %d: Forwarded %ld bytes from server to client\n", counter, total_bytes);
+	printf("Request %d: Forwarded %ld bytes from server to client\n",
+	    counter, total_bytes);
 
 	log_entry((struct sockaddr_in *)&clientaddr, uri, total_bytes);
 }
-
 
 static void
 log_entry(struct sockaddr_in *sockaddr, char *uri, size_t size)
@@ -365,9 +419,9 @@ log_entry(struct sockaddr_in *sockaddr, char *uri, size_t size)
 	fflush(proxy_log);
 }
 
-
 static int
-build_request(rio_t *rio_ptr, int connfd, char **request, char *request_line) {
+build_request(rio_t *rio_ptr, int connfd, char **request, char *request_line)
+{
 	char method[MAXLINE], uri[MAXLINE], version[MAXLINE];
 	char *hostname = NULL, *port = NULL, *pathname = NULL;
 	char buf[MAXLINE];
@@ -377,26 +431,28 @@ build_request(rio_t *rio_ptr, int connfd, char **request, char *request_line) {
 	// Parse the request line
 	if (sscanf(request_line, "%s %s %s", method, uri, version) < 3) {
 		client_error(connfd, method, 400, "Bad Request",
-			"Proxy received a malformed request line");
+		    "Proxy received a malformed request line");
 		exit(EXIT_FAILURE);
 	}
 
 	// Check if method is GET or not
 	if (strcasecmp(method, "GET") != 0) {
 		client_error(connfd, method, 501, "Not implemented",
-			"Proxy does not implement this method");
+		    "Proxy does not implement this method");
 		exit(EXIT_FAILURE);
 	}
 
 	// Parse the URI
 	if (parse_uri(uri, &hostname, &port, &pathname) == -1) {
 		client_error(connfd, method, 400, "Bad Request",
-			"Proxy could not parse the request URI");
+		    "Proxy could not parse the request URI");
 		exit(EXIT_FAILURE);
 	}
-	
+
 	// Add the properly formatted request line to request
-	request_size = strlen(method) + strlen(pathname) + strlen(version) + 4; // Add 5, two for space, two for carriage and endline character
+	request_size = strlen(method) + strlen(pathname) + strlen(version) +
+	    5; // Add 5, two for space, two for carriage and endline character,
+	       // one for null terminator
 	*request = realloc(*request, request_size);
 	strcpy(*request, method);
 	strcat(*request, " ");
@@ -417,7 +473,9 @@ build_request(rio_t *rio_ptr, int connfd, char **request, char *request_line) {
 		printf("%s\n", buf);
 
 		// Strip unwanted headers out of request
-		if (strstr(buf, "Connection") == NULL && strstr(buf, "Keep-Alive") == NULL && strstr(buf, "Proxy-Connection") == NULL) {
+		if (strstr(buf, "Connection") == NULL &&
+		    strstr(buf, "Keep-Alive") == NULL &&
+		    strstr(buf, "Proxy-Connection") == NULL) {
 			request_size += strlen(buf);
 			*request = realloc(*request, request_size);
 		}
@@ -438,5 +496,89 @@ build_request(rio_t *rio_ptr, int connfd, char **request, char *request_line) {
 		exit(EXIT_FAILURE);
 	}
 
+	free(hostname);
+	free(port);
+	free(pathname);
+
 	return serverfd;
+}
+
+static void *
+thread(void *vargp)
+{
+	(void)vargp;
+	Pthread_detach(pthread_self());
+	while (1) {
+		struct client_struct client = sbuf_remove(&sbuffer);
+		proxy_doit(client.connfd, client.clientaddr); // service client
+		Close(client.connfd);
+	}
+	return NULL;
+}
+
+static void
+sbuf_init(struct sbuf *sp, int numSlots)
+{
+	sp->client_buf = calloc(numSlots, sizeof(struct client_struct));
+	sp->numSlots = numSlots;
+	sp->front = sp->rear = 0;
+	sp->count = 0;
+	pthread_mutex_init(&sp->mutex, NULL);
+	pthread_cond_init(&sp->cond_not_empty, NULL);
+	pthread_cond_init(&sp->cond_not_full, NULL);
+}
+
+static void
+sbuf_insert(struct sbuf *sp, struct client_struct client)
+{
+	pthread_mutex_lock(&sp->mutex);
+
+	// Wait for space if buffer is full
+	while (sp->count == sp->numSlots)
+		pthread_cond_wait(&sp->cond_not_full, &sp->mutex);
+
+	// Insert the item
+	sp->rear = (sp->rear + 1) % sp->numSlots;
+	sp->client_buf[sp->rear] = client;
+	sp->count++;
+
+	// Signal that the buffer is not empty
+	pthread_cond_signal(&sp->cond_not_empty);
+	pthread_mutex_unlock(&sp->mutex);
+}
+
+// Remove and return the first item from the buffer
+static struct client_struct
+sbuf_remove(struct sbuf *sp)
+{
+	pthread_mutex_lock(&sp->mutex);
+
+	// Wait for items if buffer is empty
+	while (sp->count == 0)
+		pthread_cond_wait(&sp->cond_not_empty, &sp->mutex);
+
+	// Remove the item
+	sp->front = (sp->front + 1) % sp->numSlots;
+	struct client_struct client = sp->client_buf[sp->front];
+	sp->count--;
+
+	// Signal that the buffer is not full
+	pthread_cond_signal(&sp->cond_not_full);
+	pthread_mutex_unlock(&sp->mutex);
+	return client;
+}
+
+static void
+sbuf_clean(struct sbuf *sp)
+{
+	pthread_mutex_destroy(&sp->mutex);
+	pthread_cond_destroy(&sp->cond_not_full);
+	pthread_cond_destroy(&sp->cond_not_empty);
+	free(sp->client_buf);
+	sp->client_buf = NULL;
+
+	sp->numSlots = 0;
+	sp->front = 0;
+	sp->rear = 0;
+	sp->count = 0;
 }
