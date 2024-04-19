@@ -62,14 +62,12 @@ int
 main(int argc, char **argv)
 {
 	int listenfd;
-	// int connfd;
 	socklen_t clientlen;
 	// struct sockaddr_storage clientaddr; /* Enough space for any address
 	// */
-	char client_hostname[MAXLINE];
-	// char client_port[MAXLINE];
+	char client_hostname[MAXLINE], client_port[MAXLINE];
 	pthread_t tid;
-	char *ip_addr = NULL;
+	// char *ip_addr = NULL;
 
 	if (argc != 2) {
 		fprintf(stderr, "usage: %s <port number>\n", argv[0]);
@@ -91,7 +89,7 @@ main(int argc, char **argv)
 
 	// Initialize sbuffer object and its fields
 	sbuf_init(&sbuffer, SBUFSIZE);
-	printf("Successfully initialized sbuf.");
+	printf("Successfully initialized sbuf.\n");
 
 	// Creates worker threads
 	for (int i = 0; i < NTHREADS; i++) {
@@ -101,41 +99,63 @@ main(int argc, char **argv)
 	// Iterate through all clients trying to connect to proxy
 	while (1) {
 		// Accept incoming client connection
-		struct sockaddr_in clientaddr_in;
-		struct sockaddr_storage clientaddr_storage;
-		clientlen = sizeof(struct sockaddr_in);
-		struct hostent *host_addresses;
-		struct in_addr **addr_list;
+		struct sockaddr_storage clientaddr;
+		clientlen = sizeof(clientaddr);
 
-		host_addresses = gethostbyname(client_hostname);
-		if (host_addresses == NULL) {
-			fprintf(stderr,
-			    "gethostbyname: Unable to resolve hostname\n");
-			exit(1);
-		}
+		// struct hostent *host_addresses;
+		// struct in_addr **addr_list;
+		// Cast sockaddr_storage to sockaddr_in to access specific
+		// fields if needed
+		// struct sockaddr_in *clientaddr_in = (struct sockaddr_in
+		// *)&clientaddr;
 
-		addr_list = (struct in_addr **)host_addresses->h_addr_list;
-		if (addr_list[0] != NULL) {
-			ip_addr = inet_ntoa(*addr_list[0]);
-			printf(
-			    "\nRequest %d: Received request from client (%s)\n",
-			    counter, ip_addr);
-		} else {
-			fprintf(stderr,
-			    "No IP address found for the hostname\n");
-			exit(1);
-		}
+		// host_addresses = gethostbyname(client_hostname);
+		// if (host_addresses == NULL) {
+		// 	fprintf(stderr,
+		// 	    "gethostbyname: Unable to resolve hostname\n");
+		// 	exit(1);
+		// }
 
-		int connfd = Accept(listenfd, (SA *)&clientaddr_in, &clientlen);
+		// addr_list = (struct in_addr **)host_addresses->h_addr_list;
+		// if (addr_list[0] != NULL) {
+		// 	ip_addr = inet_ntoa(*addr_list[0]);
+		// 	printf(
+		// 	    "\nRequest %d: Received request from client (%s)\n",
+		// 	    counter, ip_addr);
+		// } else {
+		// 	fprintf(stderr,
+		// 	    "No IP address found for the hostname\n");
+		// 	exit(1);
+		// }
 
-		// Properly cast sockaddr_in to sockaddr_storage
-		memset(&clientaddr_storage, 0, sizeof(struct sockaddr_storage));
-		memcpy(&clientaddr_storage, &clientaddr_in,
-		    sizeof(struct sockaddr_in));
+		int connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
 
 		struct client_struct client;
+
+		if (client.connfd < 0) {
+			perror("Accept error");
+			continue;
+		}
+
 		client.connfd = connfd;
-		client.clientaddr = clientaddr_storage;
+		client.clientaddr = clientaddr;
+
+		// Make sure you use the correct size for the specific address
+		// family
+		int res = getnameinfo((struct sockaddr *)&clientaddr, clientlen,
+		    client_hostname, MAXLINE, client_port, MAXLINE,
+		    NI_NUMERICHOST | NI_NUMERICSERV);
+
+		if (res != 0) {
+			fprintf(stderr, "Getnameinfo error: %s\n",
+			    gai_strerror(res));
+			// Handle error, for example, by continuing to the next
+			// iteration of the loop.
+			continue;
+		}
+
+		printf("\nRequest %d: Received request from client %s:%s\n",
+		    counter, client_hostname, client_port);
 
 		sbuf_insert(&sbuffer, client);
 		// this proxy_doit might need to be moved
@@ -352,7 +372,7 @@ proxy_doit(int connfd, struct sockaddr_storage clientaddr)
 		}
 
 		if (!request_line_read) {
-			strcpy(request_line, buf);
+			strncpy(request_line, buf, MAXLINE);
 			if (sscanf(buf, "%s %s %s", method, uri, version) < 3) {
 				client_error(connfd, method, 400, "Bad Request",
 				    "Proxy received a malformed request line");
@@ -389,15 +409,22 @@ proxy_doit(int connfd, struct sockaddr_storage clientaddr)
 		}
 	}
 
-	serverfd = Open_clientfd(hostname, port);
-	if (serverfd < 0) {
-		client_error(connfd, "Server Connection Error", 500,
-		    "Internal Server Error", "Could not connect to server");
-		goto cleanup;
+	if (request_line_read) {
+		serverfd = Open_clientfd(hostname, port);
+		if (serverfd < 0) {
+			client_error(connfd, "Server Connection Error", 500,
+			    "Internal Server Error",
+			    "Could not connect to server");
+			goto cleanup;
+		}
+
+		forward_request(serverfd, connfd, request_line, request_header,
+		    clientaddr);
+		Close(serverfd); // Close the server connection immediately
+				 // after use
+		serverfd = -1;	 // Reset serverfd to indicate it's closed
 	}
-	forward_request(serverfd, connfd, request_line, request_header,
-	    clientaddr);
-	Close(serverfd);
+
 cleanup:
 	if (hostname)
 		free(hostname);
