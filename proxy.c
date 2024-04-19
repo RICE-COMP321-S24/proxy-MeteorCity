@@ -36,9 +36,13 @@ static int parse_uri(const char *uri, char **hostnamep, char **portp,
     char **pathnamep);
 
 static void proxy_doit(int connfd, struct sockaddr_storage clientaddr);
+static void forward_request(int clientfd, int connfd, char *request,
+    char *request_line, struct sockaddr_storage clientaddr);
 static void forward_request(int clientfd, int connfd, char *request_line,
     char *request_header, struct sockaddr_storage clientaddr);
 static void log_entry(struct sockaddr_in *sockaddr, char *uri, size_t size);
+static int build_request(rio_t *rio, int connfd, char **request,
+    char *request_line);
 static void *thread(void *vargp);
 static void sbuf_init(struct sbuf *sp, int n);
 static void sbuf_insert(struct sbuf *sp, struct client_struct client);
@@ -101,35 +105,7 @@ main(int argc, char **argv)
 		// Accept incoming client connection
 		struct sockaddr_storage clientaddr;
 		clientlen = sizeof(clientaddr);
-
-		// struct hostent *host_addresses;
-		// struct in_addr **addr_list;
-		// Cast sockaddr_storage to sockaddr_in to access specific
-		// fields if needed
-		// struct sockaddr_in *clientaddr_in = (struct sockaddr_in
-		// *)&clientaddr;
-
-		// host_addresses = gethostbyname(client_hostname);
-		// if (host_addresses == NULL) {
-		// 	fprintf(stderr,
-		// 	    "gethostbyname: Unable to resolve hostname\n");
-		// 	exit(1);
-		// }
-
-		// addr_list = (struct in_addr **)host_addresses->h_addr_list;
-		// if (addr_list[0] != NULL) {
-		// 	ip_addr = inet_ntoa(*addr_list[0]);
-		// 	printf(
-		// 	    "\nRequest %d: Received request from client (%s)\n",
-		// 	    counter, ip_addr);
-		// } else {
-		// 	fprintf(stderr,
-		// 	    "No IP address found for the hostname\n");
-		// 	exit(1);
-		// }
-
 		int connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
-
 		struct client_struct client;
 
 		if (client.connfd < 0) {
@@ -158,11 +134,7 @@ main(int argc, char **argv)
 		    counter, client_hostname, client_port);
 
 		sbuf_insert(&sbuffer, client);
-		// this proxy_doit might need to be moved
-		// proxy_doit(connfd, clientaddr);
 		counter++;
-		// this close might need to be moved
-		// Close(connfd);
 	}
 
 	Close(listenfd);
@@ -349,159 +321,91 @@ static const void *dummy_ref[] = { client_error, create_log_entry, dummy_ref,
 
 #include "csapp.h"
 
-static void
-proxy_doit(int connfd, struct sockaddr_storage clientaddr)
+void
+print_string_with_special_chars(const char *str)
 {
-	size_t n;
-	int request_line_read = 0; // flag to indicate if the GET line was
-	char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
-	char *hostname = NULL, *port = NULL, *pathname = NULL;
-	char request_line[MAXLINE];
-	char request_header[MAXLINE];
-	rio_t rio;
-	int serverfd = -1;
-
-	// http_request_flag = version;
-
-	Rio_readinitb(&rio, connfd);
-
-	while ((n = Rio_readlineb(&rio, buf, MAXLINE)) != 0) {
-		if (strcmp(buf, "\r\n") == 0) {
-			// Empty line found, exit the loop
+	while (*str) {
+		switch (*str) {
+		case '\n':
+			printf("\\n");
+			break;
+		case '\r':
+			printf("\\r");
+			break;
+		case '\t':
+			printf("\\t");
+			break;
+		// Add more cases for other special characters if needed
+		default:
+			if (*str < 32 || *str > 126) {
+				// Print non-printable characters using their
+				// ASCII code
+				printf("\\x%02X", (unsigned char)*str);
+			} else {
+				// Print printable characters as is
+				putchar(*str);
+			}
 			break;
 		}
-
-		if (!request_line_read) {
-			strncpy(request_line, buf, MAXLINE);
-			if (sscanf(buf, "%s %s %s", method, uri, version) < 3) {
-				client_error(connfd, method, 400, "Bad Request",
-				    "Proxy received a malformed request line");
-				return;
-			}
-
-			if (strcasecmp(method, "GET") != 0) {
-				client_error(connfd, method, 501,
-				    "Not implemented",
-				    "Proxy does not implement this method");
-				return;
-			}
-			// verify 1.0 or 1.1
-			if (strcasecmp(version, "HTTP/1.0") &&
-			    strcasecmp(version, "HTTP/1.1")) {
-				client_error(connfd, version, 505,
-				    "HTTP Version not supported",
-				    "Proxy does not support requested HTTP version");
-				return;
-			}
-
-			// Parse the URI
-			if (parse_uri(uri, &hostname, &port, &pathname) == -1) {
-				client_error(connfd, method, 400, "Bad Request",
-				    "Proxy could not parse the request URI");
-				goto cleanup;
-				return;
-			}
-
-			request_line_read = 1;
-
-		} else {
-			strcpy(request_header, buf);
-		}
+		str++;
 	}
-
-	if (request_line_read) {
-		serverfd = Open_clientfd(hostname, port);
-		if (serverfd < 0) {
-			client_error(connfd, "Server Connection Error", 500,
-			    "Internal Server Error",
-			    "Could not connect to server");
-			goto cleanup;
-		}
-
-		forward_request(serverfd, connfd, request_line, request_header,
-		    clientaddr);
-		Close(serverfd); // Close the server connection immediately
-				 // after use
-		serverfd = -1;	 // Reset serverfd to indicate it's closed
-	}
-
-cleanup:
-	if (hostname)
-		free(hostname);
-	if (port)
-		free(port);
-	if (pathname)
-		free(pathname);
 }
 
 static void
-forward_request(int serverfd, int connfd, char *request_line,
-    char *request_header, struct sockaddr_storage clientaddr)
+proxy_doit(int connfd, struct sockaddr_storage clientaddr)
 {
-	char request[MAXLINE * 2 + 5]; // Maximum size for the request
-	char response[MAXLINE];
-	char *uri = malloc(strlen(request_line) + 1);
-	strcpy(uri, request_line);
-	uri += 4; // Remove "GET "
+	char *request;
+	char request_line[MAXLINE];
+	int serverfd;
 	rio_t rio;
 
-	// Reset request buffer
+	request = malloc(1);
 	request[0] = '\0';
+	rio_readinitb(&rio, connfd);
+	rio_readlineb(&rio, request_line, MAXLINE); // Get the request line
+	serverfd = build_request(&rio, connfd, &request, request_line);
+	forward_request(serverfd, connfd, request, request_line, clientaddr);
 
-	// Remove " HTTP" from end of uri
-	char *space_ptr = strstr(uri, " HTTP");
-	if (space_ptr != NULL) {
-		*space_ptr = '\0';
-	}
+	free(request);
+	Close(serverfd);
+}
 
-	printf("%s", request_line);
-	printf("%s\n", request_header);
+static void
+forward_request(int serverfd, int connfd, char *request, char *request_line,
+    struct sockaddr_storage clientaddr)
+{
+	char response[MAXLINE];
+	char uri[MAXLINE];
+	rio_t server_rio;
 
-	// Modify request_line and request_header
-	request_line += strlen("GET http://"); // Remove "GET http://"
-	request_line += strlen(request_header) -
-	    8; // Remove host (-8 to get rid of \r\n and Host: )
+	// Obtain uri
+	sscanf(request_line, "%*s %s %*s", uri);
 
-	strcat(request, "GET ");
-	strcat(request, request_line);
-	strcat(request, request_header);
+	// Print to stdout to match reference solution
 	printf("*** End of Request ***\n");
 	printf("Request %d: Forwarding request to server:\n", counter);
 	printf(request);
-	printf("Connection: close\n\n");
-	strcat(request, "\r\n"); // Add \r\n after the header
-
-	Rio_readinitb(&rio, serverfd);
 
 	// Write the request to the server
-	if ((rio_writen(serverfd, request, strlen(request))) < 0) {
-		// writing to server fails
-		client_error(connfd, "", 504, "Gateway Timeout",
-		    "Failed to send information to server");
-		Close(serverfd);
-		return;
-	}
-	printf("Sent request to server\n");
-	// Rio_writen(serverfd, request, strlen(request));
+	rio_writen(serverfd, request, strlen(request));
+
+	// Initialize server to be read from
+	rio_readinitb(&server_rio, serverfd);
 
 	size_t total_bytes = 0;
+	size_t n;
 
-	while (Rio_readlineb(&rio, response, MAXLINE) != 0) {
-		total_bytes += strlen(response);
-		Rio_writen(connfd, response, strlen(response));
-		if (strcmp(response, "</html>\n") == 0) {
-			break;
-		}
+	while ((n = rio_readlineb(&server_rio, response, MAXLINE)) != 0) {
+		total_bytes += n;
+		rio_writen(connfd, response, n);
 	}
 
-	log_entry((struct sockaddr_in *)&clientaddr, uri, total_bytes);
-
-	uri -= 4; // Reset uri pointer to be freed
-	free(uri);
-
+	// Print to stdout to match reference solution
 	printf("*** End of Request ***\n");
 	printf("Request %d: Forwarded %ld bytes from server to client\n",
 	    counter, total_bytes);
+
+	log_entry((struct sockaddr_in *)&clientaddr, uri, total_bytes);
 }
 
 static void
@@ -513,6 +417,90 @@ log_entry(struct sockaddr_in *sockaddr, char *uri, size_t size)
 	fprintf(proxy_log, "%s\n", entry);
 	free(entry);
 	fflush(proxy_log);
+}
+
+static int
+build_request(rio_t *rio_ptr, int connfd, char **request, char *request_line)
+{
+	char method[MAXLINE], uri[MAXLINE], version[MAXLINE];
+	char *hostname = NULL, *port = NULL, *pathname = NULL;
+	char buf[MAXLINE];
+	size_t request_size;
+	int serverfd;
+
+	// Parse the request line
+	if (sscanf(request_line, "%s %s %s", method, uri, version) < 3) {
+		client_error(connfd, method, 400, "Bad Request",
+		    "Proxy received a malformed request line");
+		exit(EXIT_FAILURE);
+	}
+
+	// Check if method is GET or not
+	if (strcasecmp(method, "GET") != 0) {
+		client_error(connfd, method, 501, "Not implemented",
+		    "Proxy does not implement this method");
+		exit(EXIT_FAILURE);
+	}
+
+	// Parse the URI
+	if (parse_uri(uri, &hostname, &port, &pathname) == -1) {
+		client_error(connfd, method, 400, "Bad Request",
+		    "Proxy could not parse the request URI");
+		exit(EXIT_FAILURE);
+	}
+
+	// Add the properly formatted request line to request
+	request_size = strlen(method) + strlen(pathname) + strlen(version) +
+	    5; // Add 5, two for space, two for carriage and endline character,
+	       // one for null terminator
+	*request = realloc(*request, request_size);
+	strcpy(*request, method);
+	strcat(*request, " ");
+	strcat(*request, pathname);
+	strcat(*request, " ");
+	strcat(*request, version);
+	strcat(*request, "\r\n");
+
+	// Move to first request header
+	rio_readlineb(rio_ptr, buf, MAXLINE);
+
+	// Print to stdout to match reference solution
+	printf("%s", request_line);
+
+	// Iterate until there are no more request headers
+	while (strcmp(buf, "\r\n") != 0) {
+		// Print to stdout to match reference solution
+		printf("%s\n", buf);
+
+		// Strip unwanted headers out of request
+		if (strstr(buf, "Connection") == NULL &&
+		    strstr(buf, "Keep-Alive") == NULL &&
+		    strstr(buf, "Proxy-Connection") == NULL) {
+			request_size += strlen(buf);
+			*request = realloc(*request, request_size);
+		}
+
+		strcat(*request, buf);
+
+		rio_readlineb(rio_ptr, buf, MAXLINE);
+	}
+
+	// Add "Connection: close" header to request
+	request_size += strlen("Connection: close\r\n\r\n");
+	*request = realloc(*request, request_size);
+	strcat(*request, "Connection: close\r\n\r\n");
+
+	serverfd = Open_clientfd(hostname, port);
+	if (serverfd == -1) {
+		fprintf(stderr, "Error: Error opening serverfd");
+		exit(EXIT_FAILURE);
+	}
+
+	free(hostname);
+	free(port);
+	free(pathname);
+
+	return serverfd;
 }
 
 static void *
@@ -594,66 +582,3 @@ sbuf_clean(struct sbuf *sp)
 	sp->rear = 0;
 	sp->count = 0;
 }
-
-/*
-void print_string_with_special_chars(const char *str) {
-    while (*str) {
-	switch (*str) {
-	    case '\n':
-		printf("\\n");
-		break;
-	    case '\r':
-		printf("\\r");
-		break;
-	    case '\t':
-		printf("\\t");
-		break;
-	    // Add more cases for other special characters if needed
-	    default:
-		if (*str <html 32 || *str > 126) {
-		    // Print non-printable characters using their ASCII code
-		    printf("\\x%02X", (unsigned char)*str);
-		} else {
-		    // Print printable characters as is
-		    putchar(*str);
-		}
-		break;
-	}
-	str++;
-    }
-}
-*/
-
-/**
- * The HTTP/1.1 specification does not place an upper limit on the length of a
-URI. Moreover, in testing your proxy at web sites with rich content, you may
-encounter a URI that is longer than csapp.h’s defined MAXLINE. In other words,
-you will sooner or later encounter a start or header line in an HTTP request
-message that will not fit in a char array of size MAXLINE. Nonetheless, to
-process the line, e.g., to perform parse uri, your proxy will need to store the
-entire URI, if not the entire line, in a char array. You should explore how rio
-readlineb behaves when the length of the line being read exceeds the given
-buffer size
-*/
-
-/**
- *  Be careful about memory and file descriptor leaks. When the processing for
-an HTTP request fails for any reason, the thread must close all open socket
-descriptors and free all memory resources.
-*/
-
-/**
- * Modern web browsers and servers support persistent connections, which allow
-back-to-back requests to reuse the same connection. Your proxy will not do so.
-However, your browser is likely to set the headers Connection, Keep-Alive,
-and/or Proxy-Connection to indicate that it would like to use persistent
-connections. If you pass these headers on to the end server, it will assume that
-you can support them. If you do not support persistent connections, then
-subsequent requests on that connection will fail, so some or all of the web page
-will not load in your browser. Therefore, you should strip the Connection,
-Keep-Alive, and Proxy-Connection headers out of all requests, if they are
-present. Futhermore, HTTP/1.1 requires a Connection: close header be sent if you
-want the connection to close. Note that you must leave the other headers intact
-as many browsers and servers make use of them and will not work correctly
-without them.
-*/
