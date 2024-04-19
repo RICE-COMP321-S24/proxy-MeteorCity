@@ -18,9 +18,9 @@ static int parse_uri(const char *uri, char **hostnamep, char **portp,
     char **pathnamep);
 
 static void proxy_doit(int connfd, struct sockaddr_storage clientaddr);
-static void forward_request(int clientfd, int connfd, char *request, struct sockaddr_storage clientaddr);
+static void forward_request(int clientfd, int connfd, char *request, char *request_line, struct sockaddr_storage clientaddr);
 static void log_entry(struct sockaddr_in *sockaddr, char *uri, size_t size);
-static int build_request(rio_t * rio, int connfd, char **request);
+static int build_request(rio_t * rio, int connfd, char **request, char *request_line);
 
 int counter = 0;
 FILE *proxy_log = NULL;
@@ -303,44 +303,44 @@ static void
 proxy_doit(int connfd, struct sockaddr_storage clientaddr)
 {
 	char *request;
+	char request_line[MAXLINE];
 	int serverfd;
 	rio_t rio;
 
 	request = malloc(1);
 	rio_readinitb(&rio, connfd);
-	serverfd = build_request(&rio, connfd, &request);
-	// print_string_with_special_chars(request);
-	forward_request(serverfd, connfd, request, clientaddr);
+	rio_readlineb(&rio, request_line, MAXLINE); // Get the request line
+	serverfd = build_request(&rio, connfd, &request, request_line);
+	forward_request(serverfd, connfd, request, request_line, clientaddr);
 
 	free(request);
 	Close(serverfd);
 }
 
 static void
-forward_request(int serverfd, int connfd, char *request, struct sockaddr_storage clientaddr)
+forward_request(int serverfd, int connfd, char *request, char *request_line, struct sockaddr_storage clientaddr)
 {
 	char response[MAXLINE];
 	char uri[MAXLINE];
 	rio_t server_rio;
-	rio_t client_rio;
 
-	rio_readinitb(&client_rio, serverfd);
-	rio_readlineb(&client_rio, uri, MAXLINE);
+	// Obtain uri
+	sscanf(request_line, "%*s %s %*s", uri);
 
 	// Print to stdout to match reference solution
-	printf("%s\n", uri);
 	printf("*** End of Request ***\n");
 	printf("Request %d: Forwarding request to server:\n", counter);
 	printf(request);
 
 	// Write the request to the server
-	rio_readinitb(&server_rio, serverfd);
 	rio_writen(serverfd, request, strlen(request));
+
+	// Initialize server to be read from
+	rio_readinitb(&server_rio, serverfd);
 
 	size_t total_bytes = 0;
 	size_t n;
 
-	// Write response back to client
 	while ((n = rio_readlineb(&server_rio, response, MAXLINE)) != 0) {
 		total_bytes += n;
 		rio_writen(connfd, response, n);
@@ -353,6 +353,7 @@ forward_request(int serverfd, int connfd, char *request, struct sockaddr_storage
 	log_entry((struct sockaddr_in *)&clientaddr, uri, total_bytes);
 }
 
+
 static void
 log_entry(struct sockaddr_in *sockaddr, char *uri, size_t size)
 {
@@ -364,18 +365,17 @@ log_entry(struct sockaddr_in *sockaddr, char *uri, size_t size)
 	fflush(proxy_log);
 }
 
+
 static int
-build_request(rio_t *rio_ptr, int connfd, char **request) {
+build_request(rio_t *rio_ptr, int connfd, char **request, char *request_line) {
 	char method[MAXLINE], uri[MAXLINE], version[MAXLINE];
 	char *hostname = NULL, *port = NULL, *pathname = NULL;
 	char buf[MAXLINE];
 	size_t request_size;
 	int serverfd;
 
-	rio_readlineb(rio_ptr, buf, MAXLINE);
-
 	// Parse the request line
-	if (sscanf(buf, "%s %s %s", method, uri, version) < 3) {
+	if (sscanf(request_line, "%s %s %s", method, uri, version) < 3) {
 		client_error(connfd, method, 400, "Bad Request",
 			"Proxy received a malformed request line");
 		exit(EXIT_FAILURE);
@@ -395,7 +395,8 @@ build_request(rio_t *rio_ptr, int connfd, char **request) {
 		exit(EXIT_FAILURE);
 	}
 	
-	request_size = strlen(method) + strlen(pathname) + strlen(version) + 5; // Add 4, two for space, two for carriage and endline character, one for null terminator
+	// Add the properly formatted request line to request
+	request_size = strlen(method) + strlen(pathname) + strlen(version) + 4; // Add 5, two for space, two for carriage and endline character
 	*request = realloc(*request, request_size);
 	strcpy(*request, method);
 	strcat(*request, " ");
@@ -407,8 +408,14 @@ build_request(rio_t *rio_ptr, int connfd, char **request) {
 	// Move to first request header
 	rio_readlineb(rio_ptr, buf, MAXLINE);
 
+	// Print to stdout to match reference solution
+	printf("%s", request_line);
+
 	// Iterate until there are no more request headers
 	while (strcmp(buf, "\r\n") != 0) {
+		// Print to stdout to match reference solution
+		printf("%s\n", buf);
+
 		// Strip unwanted headers out of request
 		if (strstr(buf, "Connection") == NULL && strstr(buf, "Keep-Alive") == NULL && strstr(buf, "Proxy-Connection") == NULL) {
 			request_size += strlen(buf);
