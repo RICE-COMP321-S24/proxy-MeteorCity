@@ -50,7 +50,7 @@ static struct client_struct sbuf_remove(struct sbuf *sp);
 static void sbuf_clean(struct sbuf *sp);
 
 /* Global variables */
-int counter = 0;
+int counter = -1;
 FILE *proxy_log = NULL;
 struct sbuf sbuffer; /* Shared buffer of connected descriptors */
 // char *http_request_flag; /* HTTP/1.0 or HTTP/1.1 */
@@ -93,7 +93,6 @@ main(int argc, char **argv)
 
 	// Initialize sbuffer object and its fields
 	sbuf_init(&sbuffer, SBUFSIZE);
-	printf("Successfully initialized sbuf.\n");
 
 	// Creates worker threads
 	for (int i = 0; i < NTHREADS; i++) {
@@ -130,11 +129,11 @@ main(int argc, char **argv)
 			continue;
 		}
 
-		printf("\nRequest %d: Received request from client %s:%s\n",
-		    counter, client_hostname, client_port);
+		counter++;
+		printf("\nRequest %d: Received request from client %s\n",
+		    counter, client_hostname);
 
 		sbuf_insert(&sbuffer, client);
-		counter++;
 	}
 
 	Close(listenfd);
@@ -319,38 +318,6 @@ client_error(int fd, const char *cause, int err_num, const char *short_msg,
 static const void *dummy_ref[] = { client_error, create_log_entry, dummy_ref,
 	parse_uri };
 
-#include "csapp.h"
-
-void
-print_string_with_special_chars(const char *str)
-{
-	while (*str) {
-		switch (*str) {
-		case '\n':
-			printf("\\n");
-			break;
-		case '\r':
-			printf("\\r");
-			break;
-		case '\t':
-			printf("\\t");
-			break;
-		// Add more cases for other special characters if needed
-		default:
-			if (*str < 32 || *str > 126) {
-				// Print non-printable characters using their
-				// ASCII code
-				printf("\\x%02X", (unsigned char)*str);
-			} else {
-				// Print printable characters as is
-				putchar(*str);
-			}
-			break;
-		}
-		str++;
-	}
-}
-
 static void
 proxy_doit(int connfd, struct sockaddr_storage clientaddr)
 {
@@ -450,9 +417,9 @@ build_request(rio_t *rio_ptr, int connfd, char **request, char *request_line)
 	}
 
 	// Add the properly formatted request line to request
-	request_size = strlen(method) + strlen(pathname) + strlen(version) +
-	    5; // Add 5, two for space, two for carriage and endline character,
-	       // one for null terminator
+	request_size = strlen(method) + strlen(pathname) + strlen(version) + 5; 
+	// Add 5, two for space, two for carriage and endline character, one 
+	// for null terminator
 	*request = realloc(*request, request_size);
 	strcpy(*request, method);
 	strcat(*request, " ");
@@ -478,9 +445,8 @@ build_request(rio_t *rio_ptr, int connfd, char **request, char *request_line)
 		    strstr(buf, "Proxy-Connection") == NULL) {
 			request_size += strlen(buf);
 			*request = realloc(*request, request_size);
+			strcat(*request, buf);
 		}
-
-		strcat(*request, buf);
 
 		rio_readlineb(rio_ptr, buf, MAXLINE);
 	}
