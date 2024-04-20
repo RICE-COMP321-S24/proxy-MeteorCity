@@ -10,20 +10,73 @@ Please answer the following questions about the design of your proxy.
 
 1. Describe the steps taken by your proxy to service a single HTTP transaction
    from beginning to end.  (10-14 sentences)
+To service a single HTTP transaction, we must receive the request from the
+client, process it so that it can be forwarded to the end server, forward the
+request to the server, and then relay the response back to the client. We begin
+by initializing the rio_t structure to read the HTTP request line from the
+client’s socket, and then using sscanf to extract the method, version, and URI.
+Next we check to ensure that the method is GET, sending an error message if any
+other request is made. We then use parse_uri to extract the hostname, port, and
+pathname. If the URI is formatted wrong, an error message is sent, terminating
+the connection. Next we construct a new HTTP request to send to the server,
+reallocating memory for the request buffer and formatting the request by
+concatenating the method, pathname, and version. Then we read the headers line
+by line, omitting headers “Connection”, “Keep-Alive”, and “Proxy-Connection,”
+as per the instructions. We also add a “Connection: close” header to ensure that
+the server closes the connection after the request is serviced completely, thus
+avoiding some memory leaks. Next, the proxy connects to the server using the
+hostname and port, sending an error message if the connection fails, but if
+successful, forwards the reconstructed HTTP request. The proxy then reads the
+response from the server, reading the response line by line and relaying the
+response back to the client. Along the way, the proxy logs request details and
+the response size. Finally, to avoid memory leaks, the proxy closes the server
+connection and frees and dynamically allocated memory. The proxy then signals
+that the transaction is over, outputting that the request has been fully
+processed and the connection is closed.
 
 2. Did you modify the first line of the request message?  If so, how?
    (1-3 sentences)
+Yes, we modified the first line of the request message. We did this by
+replacing the url of the request with its corresponding pathname.
 
 3. Did you add/remove/modify any request headers?  If so, how?  (1-3 sentences)
+Yes, we removed any request headers that contained “Connection”, “Keep-Alive”,
+or “Proxy-Connection”. We did this by iterating through each line of the
+request, checking if the line contained any of those keywords, and then removing
+them if they do. We also added the request header “Connection: close” to the
+end of the request.
 
 4. How did you forward the response message?  (2-4 sentences)
+We forwarded the server’s response to the request by reading each line of the
+response using rio_readlineb. We then sent each one of the lines to the client
+file descriptor (connfd) using rio_writen.
 
 6. How many threads did your proxy use to implement concurrency?  Explain how
    you chose this number.  (3-6 sentences)
+One of the factors we considered when choosing the number of threads to
+implement was the memory space on the computer, which is tens of thousands of
+MB. To get the amount of MB our program uses, we would multiply the number of
+threads by the memory each requires which would be around 1-2MB, and then add
+on the MB required by the other variables and processes in the program. This
+gives us a large number of threads we could run, but we have to account for
+the clear server we are using, which would bring us down to around 100 threads.
+While testing, we determined that too many threads could lead to a higher time
+overhead and memory usage, so we decided to lower the number of threads down to
+a quarter of that, at around 25 threads.
 
 7. How did you write to the access log file?  (1-2 sentences)
+We wrote to the access log file by first opening a file called proxy.log using
+the fopen function. After that we wrote to the file using fprintf and closed
+the file with fclose.
 
 8. How do you ensure atomicity when writing to the access log file?
    (1-2 sentences)
+We ensured atomicity when writing to the access log file by using fprintf which
+writes a whole formatted line to the proxy.log file at once. Therefore, even if
+multiple threads are writing to the log file at the same time, there will never
+be any interleaved or partial writes.
 
 9. When did you open/close the access log file?  (2 sentences)
+We used fopen to open the access log file before going into the infinite loop
+that accepts client connections. We then closed the access log file with fclose
+after the infinite loop ended.

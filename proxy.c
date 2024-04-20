@@ -9,8 +9,8 @@
 #include <assert.h>
 
 #include "csapp.h"
-#define NTHREADS 4
-#define SBUFSIZE 16
+#define NTHREADS 25
+#define SBUFSIZE 100
 
 struct client_struct {
 	struct sockaddr_storage clientaddr;
@@ -37,10 +37,9 @@ static int parse_uri(const char *uri, char **hostnamep, char **portp,
     char **pathnamep);
 
 static void proxy_doit(int connfd, struct sockaddr_storage clientaddr);
+static void handleLongLine(rio_t *rio_ptr, char **line);
 static void forward_request(int clientfd, int connfd, char *request,
     char *request_line, struct sockaddr_storage clientaddr);
-static void forward_request(int clientfd, int connfd, char *request_line,
-    char *request_header, struct sockaddr_storage clientaddr);
 static void log_entry(struct sockaddr_in *sockaddr, char *uri, size_t size);
 static int build_request(rio_t *rio, int connfd, char **request,
     char *request_line);
@@ -317,14 +316,19 @@ static void
 proxy_doit(int connfd, struct sockaddr_storage clientaddr)
 {
 	char *request;
-	char request_line[MAXLINE];
+	char *request_line = malloc(MAXLINE + 1);
+	size_t n;
 	int serverfd;
 	rio_t rio;
 
 	request = malloc(1);
 	request[0] = '\0';
 	rio_readinitb(&rio, connfd);
-	rio_readlineb(&rio, request_line, MAXLINE); // Get the request line
+	n = rio_readlineb(&rio, request_line, MAXLINE); // Get the request line
+	if (n == MAXLINE - 1) {
+		handleLongLine(&rio, &request_line);
+	}
+
 	serverfd = build_request(&rio, connfd, &request, request_line);
 	if (serverfd != -1) {
 		forward_request(serverfd, connfd, request, request_line, clientaddr);
@@ -332,6 +336,22 @@ proxy_doit(int connfd, struct sockaddr_storage clientaddr)
 	}
 
 	free(request);
+}
+
+static void
+handleLongLine(rio_t *rio_ptr, char **line)
+{
+	size_t line_size, curr_size;
+	char curr_buf[MAXLINE];
+	memset(curr_buf, 0, MAXLINE);
+	curr_size = line_size = MAXLINE - 1;
+
+	while(curr_buf[curr_size - 1] != '\n') {
+		curr_size = rio_readlineb(rio_ptr, curr_buf, MAXLINE);
+		line_size += curr_size;
+		*line = realloc(*line, line_size);
+		strcat(*line, curr_buf);
+	}
 }
 
 static void
@@ -388,8 +408,8 @@ build_request(rio_t *rio_ptr, int connfd, char **request, char *request_line)
 {
 	char method[MAXLINE], uri[MAXLINE], version[MAXLINE];
 	char *hostname = NULL, *port = NULL, *pathname = NULL;
-	char buf[MAXLINE];
-	size_t request_size;
+	char *buf = malloc(MAXLINE + 1);
+	size_t request_size, buf_size;
 	int serverfd;
 
 	// Parse the request line
@@ -426,7 +446,10 @@ build_request(rio_t *rio_ptr, int connfd, char **request, char *request_line)
 	strcat(*request, "\r\n");
 
 	// Move to first request header
-	rio_readlineb(rio_ptr, buf, MAXLINE);
+	buf_size = rio_readlineb(rio_ptr, buf, MAXLINE);
+	if (buf_size == MAXLINE - 1) {
+		handleLongLine(rio_ptr, &buf);
+	}
 
 	// Print to stdout to match reference solution
 	printf("%s", request_line);
@@ -445,7 +468,10 @@ build_request(rio_t *rio_ptr, int connfd, char **request, char *request_line)
 			strcat(*request, buf);
 		}
 
-		rio_readlineb(rio_ptr, buf, MAXLINE);
+		buf_size = rio_readlineb(rio_ptr, buf, MAXLINE);
+		if (buf_size == MAXLINE - 1) {
+			handleLongLine(rio_ptr, &buf);
+		}
 	}
 
 	// Add "Connection: close" header to request
