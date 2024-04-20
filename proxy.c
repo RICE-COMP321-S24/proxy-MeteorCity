@@ -15,6 +15,7 @@
 struct client_struct {
 	struct sockaddr_storage clientaddr;
 	int connfd;
+	char *hostname;
 };
 
 struct sbuf {
@@ -121,6 +122,8 @@ main(int argc, char **argv)
 		    client_hostname, MAXLINE, client_port, MAXLINE,
 		    NI_NUMERICHOST | NI_NUMERICSERV);
 
+		client.hostname = client_hostname;
+
 		if (res != 0) {
 			fprintf(stderr, "Getnameinfo error: %s\n",
 			    gai_strerror(res));
@@ -128,10 +131,6 @@ main(int argc, char **argv)
 			// iteration of the loop.
 			continue;
 		}
-
-		counter++;
-		printf("\nRequest %d: Received request from client %s\n",
-		    counter, client_hostname);
 
 		sbuf_insert(&sbuffer, client);
 	}
@@ -314,10 +313,6 @@ client_error(int fd, const char *cause, int err_num, const char *short_msg,
 		rio_writen(fd, body, strlen(body));
 }
 
-// Prevent "unused function" and "unused variable" warnings.
-static const void *dummy_ref[] = { client_error, create_log_entry, dummy_ref,
-	parse_uri };
-
 static void
 proxy_doit(int connfd, struct sockaddr_storage clientaddr)
 {
@@ -331,10 +326,12 @@ proxy_doit(int connfd, struct sockaddr_storage clientaddr)
 	rio_readinitb(&rio, connfd);
 	rio_readlineb(&rio, request_line, MAXLINE); // Get the request line
 	serverfd = build_request(&rio, connfd, &request, request_line);
-	forward_request(serverfd, connfd, request, request_line, clientaddr);
+	if (serverfd != -1) {
+		forward_request(serverfd, connfd, request, request_line, clientaddr);
+		Close(serverfd);
+	}
 
 	free(request);
-	Close(serverfd);
 }
 
 static void
@@ -362,15 +359,15 @@ forward_request(int serverfd, int connfd, char *request, char *request_line,
 	size_t total_bytes = 0;
 	size_t n;
 
-	while ((n = rio_readlineb(&server_rio, response, MAXLINE)) != 0) {
+	printf("*** End of Request ***\n");
+	while ((n = rio_readnb(&server_rio, response, MAXLINE)) != 0) {
 		total_bytes += n;
 		rio_writen(connfd, response, n);
-	}
 
-	// Print to stdout to match reference solution
-	printf("*** End of Request ***\n");
-	printf("Request %d: Forwarded %ld bytes from server to client\n",
-	    counter, total_bytes);
+		// Print to stdout to match reference solution
+		printf("Request %d: Forwarded %ld bytes from server to client\n"
+		, counter, n);
+	}
 
 	log_entry((struct sockaddr_in *)&clientaddr, uri, total_bytes);
 }
@@ -399,21 +396,21 @@ build_request(rio_t *rio_ptr, int connfd, char **request, char *request_line)
 	if (sscanf(request_line, "%s %s %s", method, uri, version) < 3) {
 		client_error(connfd, method, 400, "Bad Request",
 		    "Proxy received a malformed request line");
-		exit(EXIT_FAILURE);
+		return -1;
 	}
 
 	// Check if method is GET or not
 	if (strcasecmp(method, "GET") != 0) {
 		client_error(connfd, method, 501, "Not implemented",
 		    "Proxy does not implement this method");
-		exit(EXIT_FAILURE);
+		return -1;
 	}
 
 	// Parse the URI
 	if (parse_uri(uri, &hostname, &port, &pathname) == -1) {
 		client_error(connfd, method, 400, "Bad Request",
 		    "Proxy could not parse the request URI");
-		exit(EXIT_FAILURE);
+		return -1;
 	}
 
 	// Add the properly formatted request line to request
@@ -459,7 +456,10 @@ build_request(rio_t *rio_ptr, int connfd, char **request, char *request_line)
 	serverfd = Open_clientfd(hostname, port);
 	if (serverfd == -1) {
 		fprintf(stderr, "Error: Error opening serverfd");
-		exit(EXIT_FAILURE);
+		free(hostname);
+		free(port);
+		free(pathname);
+		return -1;
 	}
 
 	free(hostname);
@@ -476,6 +476,9 @@ thread(void *vargp)
 	Pthread_detach(pthread_self());
 	while (1) {
 		struct client_struct client = sbuf_remove(&sbuffer);
+		counter++;
+		printf("\nRequest %d: Received request from client %s\n",
+		    counter, client.hostname);
 		proxy_doit(client.connfd, client.clientaddr); // service client
 		Close(client.connfd);
 	}
