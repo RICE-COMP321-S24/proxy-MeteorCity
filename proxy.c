@@ -57,10 +57,14 @@ struct sbuf sbuffer; /* Shared buffer of connected descriptors */
 
 /*
  * Requires:
- *   <to be filled in by the student(s)>
+ *   argv[1]: A string representing the port number 
  *
  * Effects:
- *   <to be filled in by the student(s)>
+ *   Replicates a proxy. Opens a socket and continuously listens for incoming
+ *   client connections. Creates a number of threads to deal with the client
+ *   connections in case requests are sent in concurrently. Finally opens and
+ *   closes a log file to log the connections made to the proxy and server
+ *   responses to HTTP requests.
  */
 int
 main(int argc, char **argv)
@@ -312,6 +316,13 @@ client_error(int fd, const char *cause, int err_num, const char *short_msg,
 		rio_writen(fd, body, strlen(body));
 }
 
+/*
+ * Requires:
+ *   Nothing.
+ * 
+ * Effects:
+ *   Builds the request string and sends it to the end server for a response.
+*/
 static void
 proxy_doit(int connfd, struct sockaddr_storage clientaddr)
 {
@@ -321,14 +332,18 @@ proxy_doit(int connfd, struct sockaddr_storage clientaddr)
 	int serverfd;
 	rio_t rio;
 
+	// malloc space for request
 	request = malloc(1);
 	request[0] = '\0';
 	rio_readinitb(&rio, connfd);
 	n = rio_readlineb(&rio, request_line, MAXLINE); // Get the request line
+
+	// Handle the case where request_line is larger than MAXLINE
 	if (n == MAXLINE - 1) {
 		handleLongLine(&rio, &request_line);
 	}
 
+	// Build the actual request to be sent to the end server
 	serverfd = build_request(&rio, connfd, &request, request_line);
 	if (serverfd != -1) {
 		forward_request(serverfd, connfd, request, request_line, clientaddr);
@@ -338,6 +353,14 @@ proxy_doit(int connfd, struct sockaddr_storage clientaddr)
 	free(request);
 }
 
+/*
+ * Requires:
+ *   Nothing.
+ * 
+ * Effects:
+ *   Handles the case in which a given line is larger than MAXLINE. Continuously
+ *   mallocs more space for the line and adds the missing parts in.
+*/
 static void
 handleLongLine(rio_t *rio_ptr, char **line)
 {
@@ -346,14 +369,25 @@ handleLongLine(rio_t *rio_ptr, char **line)
 	memset(curr_buf, 0, MAXLINE);
 	curr_size = line_size = MAXLINE - 1;
 
+	// Keep iterating until we find an endline character
 	while(curr_buf[curr_size - 1] != '\n') {
 		curr_size = rio_readlineb(rio_ptr, curr_buf, MAXLINE);
 		line_size += curr_size;
+		
+		// Realloc memory for line and concatenate the missing pieces
 		*line = realloc(*line, line_size);
 		strcat(*line, curr_buf);
 	}
 }
 
+/*
+ * Requires:
+ *   Nothing.
+ * 
+ * Effects:
+ *   Forwards the request to the end server and calls log_entry to make a log
+ *   of the request and response in proxy.log.
+*/
 static void
 forward_request(int serverfd, int connfd, char *request, char *request_line,
     struct sockaddr_storage clientaddr)
@@ -380,8 +414,12 @@ forward_request(int serverfd, int connfd, char *request, char *request_line,
 	size_t n;
 
 	printf("*** End of Request ***\n");
+
+	// Read the server's response to the request
 	while ((n = rio_readnb(&server_rio, response, MAXLINE)) != 0) {
 		total_bytes += n;
+
+		// Write the response to the client
 		rio_writen(connfd, response, n);
 
 		// Print to stdout to match reference solution
@@ -389,20 +427,38 @@ forward_request(int serverfd, int connfd, char *request, char *request_line,
 		, counter, n);
 	}
 
+	// Make the log entry
 	log_entry((struct sockaddr_in *)&clientaddr, uri, total_bytes);
 }
 
+/*
+ * Requires:
+ *   Nothing.
+ * 
+ * Effects:
+ *   Write a log of the request to the proxy.log file containing the time of
+ *   the request, the host address, and the size of the server's response.
+*/
 static void
 log_entry(struct sockaddr_in *sockaddr, char *uri, size_t size)
 {
 	char *entry;
 	entry = create_log_entry(sockaddr, uri, size);
 
+	// Write to the log file and free the entry string
 	fprintf(proxy_log, "%s\n", entry);
 	free(entry);
 	fflush(proxy_log);
 }
 
+/*
+ * Requires:
+ *   Nothing.
+ * 
+ * Effects:
+ *   Builds the request to be sent to the end server and sets up the file
+ *   descriptor connecting the proxy to the end server.
+*/
 static int
 build_request(rio_t *rio_ptr, int connfd, char **request, char *request_line)
 {
@@ -495,6 +551,14 @@ build_request(rio_t *rio_ptr, int connfd, char **request, char *request_line)
 	return serverfd;
 }
 
+/*
+ * Requires:
+ *   Nothing.
+ * 
+ * Effects:
+ *   Detaches the calling thread and enters an infinite loop to continuously
+ *   service client requests.
+*/
 static void *
 thread(void *vargp)
 {
@@ -511,6 +575,15 @@ thread(void *vargp)
 	return NULL;
 }
 
+/*
+ * Requires:
+ *   Nothing.
+ * 
+ * Effects:
+ *   Initializes the shared buffer with the given number of slots.
+ *   Allocates memory for the buffer and initializes its fields.
+ *   Initializes the mutex and condition variables used for synchronization.
+*/
 static void
 sbuf_init(struct sbuf *sp, int numSlots)
 {
@@ -523,6 +596,14 @@ sbuf_init(struct sbuf *sp, int numSlots)
 	pthread_cond_init(&sp->cond_not_full, NULL);
 }
 
+/*
+ * Requires:
+ *   Nothing.
+ * 
+ * Effects:
+ *   Locks the mutex and inserts the item into the buffer when space is
+ *   available. Also then signals that the buffer is not empty.
+*/
 static void
 sbuf_insert(struct sbuf *sp, struct client_struct client)
 {
@@ -542,7 +623,13 @@ sbuf_insert(struct sbuf *sp, struct client_struct client)
 	pthread_mutex_unlock(&sp->mutex);
 }
 
-// Remove and return the first item from the buffer
+/*
+ * Requires:
+ *   Nothing.
+ * 
+ * Effects:
+ *   Remove and return the first item from the buffer
+*/
 static struct client_struct
 sbuf_remove(struct sbuf *sp)
 {
@@ -563,6 +650,13 @@ sbuf_remove(struct sbuf *sp)
 	return client;
 }
 
+/*
+ * Requires:
+ *   Nothing.
+ * 
+ * Effects:
+ *   Destroys and cleans up the mutex and client_buf
+*/
 static void
 sbuf_clean(struct sbuf *sp)
 {
